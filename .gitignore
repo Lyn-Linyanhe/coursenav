@@ -1,0 +1,5 @@
+build/
+*.apk
+debug.keystore
+.DS_Store
+Thumbs.db
