@@ -59,6 +59,7 @@ public class MainActivity extends Activity {
     private static final int REQ_NOTIFY = 1002;
     private static final int REQ_IMAGE = 1003;
     private static final int REQ_PDF = 1004;
+    private static final int REQ_STORAGE = 1005;
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
 
@@ -74,6 +75,7 @@ public class MainActivity extends Activity {
         root.addView(web);
         setContentView(root);
         createChannel();
+        maybeRequestStoragePermission();
         String open = getIntent() == null ? null : getIntent().getStringExtra("open");
         web.loadUrl("file:///android_asset/www/index.html" + ("todos".equals(open) ? "#/todos" : ("home".equals(open) ? "#/home" : "")));
     }
@@ -84,7 +86,6 @@ public class MainActivity extends Activity {
         s.setDomStorageEnabled(true);
         s.setDatabaseEnabled(true);
         s.setAllowFileAccess(true);
-        s.setAllowFileAccessFromFileURLs(true);
         s.setAllowContentAccess(true);
         s.setSupportZoom(false);
         s.setBuiltInZoomControls(false);
@@ -176,60 +177,68 @@ public class MainActivity extends Activity {
         super.onActivityResult(req, res, data);
         if (req == REQ_IMAGE) {
             if (res != RESULT_OK || data == null || data.getData() == null) return;
-            Uri uri = data.getData();
-            try {
-                JSONObject o = readImage(uri);
-                notifyJs("onImagePicked", o.toString());
-            } catch (Exception e) {
-                toast("读取图片失败：" + e.getMessage());
-                notifyJs("onImagePicked", "{\"error\":true}");
-            }
+            final Uri uri = data.getData();
+            // 读取、解码、压缩放工作线程，避免主线程 ANR
+            new Thread(() -> {
+                try {
+                    JSONObject o = readImage(uri);
+                    notifyJs("onImagePicked", o.toString());
+                } catch (Exception e) {
+                    toast("读取图片失败：" + e.getMessage());
+                    notifyJs("onImagePicked", "{\"error\":true}");
+                }
+            }).start();
             return;
         }
         if (req == REQ_PDF) {
             if (res != RESULT_OK || data == null || data.getData() == null) return;
-            Uri uri = data.getData();
-            try {
-                JSONObject o = readPdf(uri);
-                notifyJs("onPdfPicked", o.toString());
-            } catch (Exception e) {
-                toast("读取 PDF 失败：" + e.getMessage());
-                notifyJs("onPdfPicked", "{\"error\":true}");
-            }
+            final Uri uri = data.getData();
+            new Thread(() -> {
+                try {
+                    JSONObject o = readPdf(uri);
+                    notifyJs("onPdfPicked", o.toString());
+                } catch (Exception e) {
+                    toast("读取 PDF 失败：" + e.getMessage());
+                    notifyJs("onPdfPicked", "{\"error\":true}");
+                }
+            }).start();
             return;
         }
         if (req == REQ_FILE) {
-            Uri uri = null;
-            if (res == RESULT_OK && data != null && data.getData() != null) uri = data.getData();
+            final Uri uri = (res == RESULT_OK && data != null && data.getData() != null) ? data.getData() : null;
             if (uri == null) {
                 if (fileCallback != null) fileCallback.onReceiveValue(null);
                 fileCallback = null;
                 return;
             }
-            try {
-                InputStream in = getContentResolver().openInputStream(uri);
-                ByteArrayOutputStream bo = new ByteArrayOutputStream();
-                byte[] buf = new byte[8192];
-                int n, total = 0;
-                while ((n = in.read(buf)) > 0) {
-                    total += n;
-                    if (total > 3 * 1024 * 1024) throw new Exception("文件超过 3MB");
-                    bo.write(buf, 0, n);
+            new Thread(() -> {
+                String payload;
+                try {
+                    InputStream in = getContentResolver().openInputStream(uri);
+                    ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                    byte[] buf = new byte[8192];
+                    int n, total = 0;
+                    while ((n = in.read(buf)) > 0) {
+                        total += n;
+                        if (total > 3 * 1024 * 1024) throw new Exception("文件超过 3MB");
+                        bo.write(buf, 0, n);
+                    }
+                    in.close();
+                    JSONObject o = new JSONObject();
+                    o.put("name", queryName(uri));
+                    o.put("text", bo.toString("UTF-8"));
+                    payload = o.toString();
+                } catch (Exception e) {
+                    toast("读取文件失败：" + e.getMessage());
+                    payload = "{\"error\":true}";
                 }
-                in.close();
-                String name = queryName(uri);
-                String text = bo.toString("UTF-8");
-                JSONObject o = new JSONObject();
-                o.put("name", name);
-                o.put("text", text);
-                notifyJs("onFilePicked", o.toString());
-            } catch (Exception e) {
-                toast("读取文件失败：" + e.getMessage());
-                notifyJs("onFilePicked", "{\"error\":true}");
-            } finally {
-                if (fileCallback != null) fileCallback.onReceiveValue(new Uri[]{uri});
-                fileCallback = null;
-            }
+                final String pl = payload;
+                runOnUiThread(() -> {
+                    notifyJs("onFilePicked", pl);
+                    if (fileCallback != null) fileCallback.onReceiveValue(new Uri[]{uri});
+                    fileCallback = null;
+                });
+            }).start();
         }
     }
 
@@ -317,6 +326,10 @@ public class MainActivity extends Activity {
         if (req == REQ_NOTIFY) {
             boolean ok = res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED;
             notifyJs("onNotifyPermission", ok ? "true" : "false");
+        }
+        if (req == REQ_STORAGE) {
+            boolean ok = res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED;
+            if (!ok) toast("未授予存储权限，导出备份/日志可能失败");
         }
     }
 
@@ -701,6 +714,15 @@ public class MainActivity extends Activity {
                     if (conn != null) conn.disconnect();
                 }
             }).start();
+        }
+    }
+
+    private void maybeRequestStoragePermission() {
+        // Android 6.0–9.0 直接写公共 Download 目录需要运行时授权；API 29+ 走 MediaStore 无需权限
+        if (Build.VERSION.SDK_INT >= 23 && Build.VERSION.SDK_INT <= 28
+                && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                        != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_STORAGE);
         }
     }
 

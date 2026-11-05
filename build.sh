@@ -42,7 +42,7 @@ if [ ! -f "$KS" ]; then
     -dname "CN=CourseNav Debug,O=CourseNav,C=CN" >/dev/null 2>&1
 fi
 "$BT/apksigner" sign --ks "$KS" --ks-pass pass:android --key-pass pass:android \
-  --v1-signing-enabled true --v2-signing-enabled true \
+  --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
   --out CourseNav.apk "$OUT/aligned.apk"
 "$BT/apksigner" verify --print-certs CourseNav.apk | head -4
 ls -lh CourseNav.apk

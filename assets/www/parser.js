@@ -40,7 +40,7 @@
     { key: '下载资料', re: /资料|课件|下载|文献|讲义/ }
   ];
 
-  const TASK_WORDS = /提交|上交|交|完成|截止|参加|报名|观看|签到|打卡|考试|测验|讨论|预习|复习|练习|开放|上传|写|做|准备|阅读/;
+  const TASK_WORDS = /提交|上交|交|完成|截止|参加|报名|观看|签到|打卡|考试|测验|讨论|预习|复习|练习|开放|发布|上传|写|做|准备|阅读/;
   const TASK_NOUN = /([\u4e00-\u9fa5A-Za-z0-9（）()《》·\-]{2,26}?(?:作业|报告|论文|实验|习题|练习|测验|考试|打卡|签到|讨论|任务|项目|展示|视频|资料|课件|pre|presentation|reading|quiz|essay))/i;
 
   function uid(prefix) {
@@ -60,6 +60,7 @@
       .replace(/\r\n?/g, '\n')
       .replace(/[ \t]+/g, ' ')
       .replace(/：/g, ':')
+      .replace(/[０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); })
       .replace(/\n{3,}/g, '\n\n')
       .trim();
   }
@@ -69,9 +70,10 @@
   /* ---------- 截止时间 ---------- */
   function applyMeridiem(h, m, mer) {
     if (!mer) return [h, m];
-    if (/下午|晚上|傍晚|^晚$/.test(mer) && h < 12) h += 12;
-    if (/中午/.test(mer) && h < 11) h += 12;
-    if (/凌晨/.test(mer) && h === 12) h = 0;
+    if (/凌晨/.test(mer)) { if (h === 12) h = 0; return [h, m]; }
+    if (/中午/.test(mer)) { if (h >= 1 && h <= 2) h += 12; return [h, m]; } // 中午1点=13点；中午10点按上午处理
+    if (/下午|傍晚/.test(mer)) { if (h < 12) h += 12; return [h, m]; }      // 下午12点=正午
+    if (/晚上|^晚$/.test(mer)) { if (h === 12) h = 0; else if (h < 12) h += 12; return [h, m]; } // 晚上12点=午夜
     return [h, m];
   }
 
@@ -89,6 +91,8 @@
   }
 
   function relativeDate(now, rel, wd, hh, mm) {
+    if (rel === '今晚') rel = '今天';
+    if (rel === '明晚') rel = '明天';
     const base = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hh, mm, 0);
     if (rel === '今天') return base;
     if (rel === '明天') { base.setDate(base.getDate() + 1); return base; }
@@ -115,7 +119,9 @@
 
   function parseDeadline(text, now) {
     now = now || new Date();
-    const s = String(text || '');
+    const s = String(text || '')
+      .replace(/[０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); })
+      .replace(/点半/g, '点30'); // 「晚上8点半」→「晚上8点30」
     let m, mer, hh, mm, d;
 
     // 2026-11-20 23:59 / 2026年11月20日 23:59
@@ -130,18 +136,19 @@
       [hh, mm] = fixHour.apply(null, applyMeridiem(+m[4], +(m[5] || 0), m[3]));
       if (hh < 24 && mm < 60) return { date: buildDate(null, +m[1], +m[2], hh, mm, now), confidence: 0.9, text: m[0] };
     }
-    // 11/20 23:59 或 11.20
-    m = s.match(/(?<!\d)(\d{1,2})\s*[-/.]\s*(\d{1,2})\s*(?:日)?\s*(上午|下午|晚上|中午|凌晨)?\s*(\d{1,2})\s*[:：]\s*(\d{1,2})?/);
+    // 11/20 23:59 或 11.20（用捕获组代替 lookbehind，兼容旧 WebView）
+    m = s.match(/(^|[^\d])(\d{1,2})\s*[-/.]\s*(\d{1,2})\s*(?:日)?\s*(上午|下午|晚上|中午|凌晨)?\s*(\d{1,2})\s*[:：]\s*(\d{1,2})?/);
     if (m) {
-      [hh, mm] = fixHour.apply(null, applyMeridiem(+m[4], +(m[5] || 0), m[3]));
-      if (hh < 24 && mm < 60 && +m[1] <= 12 && +m[2] <= 31) {
-        return { date: buildDate(null, +m[1], +m[2], hh, mm, now), confidence: 0.82, text: m[0] };
+      [hh, mm] = fixHour.apply(null, applyMeridiem(+m[5], +(m[6] || 0), m[4]));
+      if (hh < 24 && mm < 60 && +m[2] <= 12 && +m[3] <= 31) {
+        return { date: buildDate(null, +m[2], +m[3], hh, mm, now), confidence: 0.82, text: m[0].replace(/^[^\d]/, '') };
       }
     }
-    // 相对星期：本周五18:00 / 下周一 / 周三 23:59
-    m = s.match(/(今天|明天|后天|大后天|本周|这周|下周|周|星期)([一二三四五六日天])?\s*(上午|下午|晚上|晚|早上|早|中午|凌晨)?\s*(\d{1,2})\s*[:：点时]\s*(\d{1,2})?/);
+    // 相对星期：本周五18:00 / 下周一 / 周三 23:59 / 明晚8点
+    m = s.match(/(今天|明天|后天|大后天|今晚|明晚|本周|这周|下周|周|星期)([一二三四五六日天])?\s*(上午|下午|晚上|晚|早上|早|中午|凌晨)?\s*(\d{1,2})\s*[:：点时]\s*(\d{1,2})?/);
     if (m) {
       [hh, mm] = fixHour.apply(null, applyMeridiem(+m[4], +(m[5] || 0), m[3]));
+      if (!m[3] && (m[1] === '今晚' || m[1] === '明晚') && hh < 12) hh += 12; // 「明晚8点」=20点
       const base = relativeDate(now, m[1], m[2], hh, mm);
       if (base) return { date: base, confidence: 0.8, text: m[0] };
     }
@@ -161,13 +168,18 @@
       const base = relativeDate(now, m[1], m[2], 23, 59);
       if (base) return { date: base, confidence: 0.7, text: m[0] };
     }
-    // 仅时间：截止 23:59
-    m = s.match(/(截止|之前|前)?\s*(上午|下午|晚上|中午|凌晨)?\s*(\d{1,2})\s*[:：]\s*(\d{1,2})/);
+    // 仅时间：截止 23:59 / 晚上8点 / 19点 / 18:00前（需要关键词、时段词或「点/时」；纯 N:N 比分不算时间）
+    m = s.match(/(截止|之前|前)?\s*(上午|下午|晚上|中午|凌晨)?\s*(\d{1,2})\s*[:：点时]\s*(\d{1,2})?\s*分?\s*(之前|以前|前|截止)?/);
     if (m) {
-      [hh, mm] = applyMeridiem(+m[3], +m[4], m[2]);
-      let base = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hh, mm, 0);
-      if (base.getTime() < now.getTime()) base.setDate(base.getDate() + 1);
-      return { date: base, confidence: 0.55, text: m[0] };
+      const before = s.slice(Math.max(0, m.index - 6), m.index); // 「截止：23:59」的关键词在 match 起点之前
+      if (m[1] || m[5] || m[2] || /点|时/.test(m[0]) || /截止|之前|以前|前/.test(before)) {
+      [hh, mm] = fixHour.apply(null, applyMeridiem(+m[3], +(m[4] || 0), m[2]));
+      if (hh < 24 && mm < 60 && (m[2] ? hh >= 0 : hh >= 5)) {
+        let base = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hh, mm, 0);
+        if (base.getTime() < now.getTime()) base.setDate(base.getDate() + 1);
+        return { date: base, confidence: 0.55, text: m[0] };
+      }
+      }
     }
     return null;
   }
@@ -247,7 +259,7 @@
     const body = [];
     for (let i = start; i < lines.length && body.length < 10; i++) {
       const l = lines[i];
-      if (i > start && (CHAT_NOISE.test(l) || /^(子程|芳俊|嘉鑫|淝溢|李红冉|周子程|严芳俊|彭嘉鑫)$/.test(l))) break;
+      if (i > start && CHAT_NOISE.test(l)) break;
       body.push(l);
     }
     const joined = body.join(' ');
@@ -275,7 +287,8 @@
     if ((m = text.match(/【([^】\n]{2,30})】/))) cands.push({ v: m[1], s: 0.9, p: '方括号' });
     if ((m = text.match(/(?:课程名称|课程名|科目)\s*[:：]\s*([^\n，。；]{2,30})/))) cands.push({ v: m[1], s: 0.95, p: '课程字段' });
     if ((m = text.match(/(?:关于|就)?\s*([\u4e00-\u9fa5A-Za-z0-9（）()·\-]{2,24})\s*(?:课程)?\s*(?:的)?\s*(?:通知|作业|任务|安排|学习|考试)/))) cands.push({ v: m[1], s: 0.78, p: '通知标题' });
-    if ((m = text.match(/^([\u4e00-\u9fa5A-Za-z0-9（）()·\-]{2,22})\s*(?:课程)?\s*[:：]/m))) cands.push({ v: m[1], s: 0.7, p: '行首字段' });
+    if ((m = text.match(/^([\u4e00-\u9fa5A-Za-z0-9（）()·\-]{2,22})\s*(?:课程)?\s*[:：]/m))
+        && !/^(deadline|ddl|note|time|due|date|from|to|subject|course)$/i.test(m[1])) cands.push({ v: m[1], s: 0.7, p: '行首字段' });
     if ((m = text.match(/([\u4e00-\u9fa5]{2,18})\s*(?:课程)?\s*(?:第\s*\d+\s*次)?\s*作业/))) cands.push({ v: m[1], s: 0.66, p: '作业标题' });
     if ((m = text.match(/(?:提交|完成|做|写|参加)?\s*([\u4e00-\u9fa5]{2,14})(?:实验|实训|上机)\s*(?:报告|作业|任务)?/))) cands.push({ v: m[1], s: 0.68, p: '实验标题' });
     if ((m = text.match(/([\u4e00-\u9fa5A-Za-z]{2,14}(?:数学|英语|物理|化学|生物|历史|地理|政治|语文|体育|程序|设计|原理|概论|导论|代数|电路|力学|材料|经济|管理|会计|统计|法律|哲学|文学|实验|史|论|学))\s*(?:课程|课)?\s*(?=[，,：:\s]|老师|教师|[\u4e00-\u9fa5]{1,3}(?:老师|教师|教授)|$)/))) cands.push({ v: m[1], s: 0.86, p: '学科名' });
@@ -387,13 +400,12 @@
     s = s.replace(/关于|对于/g, ' ')
       .replace(/[【《][^】》]{0,30}[】》]/g, ' ')
       .replace(/(时间|日期)(是|为|[:：])?/g, ' ')
-      .replace(/^[\u4e00-\u9fa5]{2,10}[A-Za-z]?\d{0,2}\s*(?=(?:期中|期末|考试|测验|作业|实验|报告|论文|习题|练习|项目|展示))/g, ' ')
       .replace(/^(关于|就)?\s*(课程通知|通知|公告)[:：]?\s*/, ' ')
       .replace(/(课程的通知|课程通知|通知|公告)/g, ' ')
       .replace(/(逾期不候|逾期|谢谢|请知悉|特此通知|望周知)/g, ' ')
       .replace(/截止(时间|日期)?\s*[:：]?/g, ' ')
-      .replace(/(定于|安排在|开始|举行|进行|请务必|务必|请|大家|同学们|各位同学|注意|提醒|记得|需要|要求|于|在|把|将)/g, ' ')
-      .replace(/(提交|上交|交|上传|完成|参加|观看|打卡|签到|报名|预习|复习|练习|准备|已开放|已发布|已上线|可以|先|结合|一下)/g, ' ')
+      .replace(/(定于|安排在|开始|举行|进行|请务必|务必|请|大家|同学们|各位同学|注意|提醒|记得|需要|要求|准时|按时|尽快|于|在|把|将)/g, ' ')
+      .replace(/(提交|上交|交|上传|完成|参加|观看|打卡|签到|报名|预习|复习|练习|准备|已开放|已发布|已上线|可以|先|结合|一下|写|做)/g, ' ')
       .replace(/(今天|明天|后天|大后天|今晚|明晚)/g, ' ')
       .replace(/(本周|这周|下周)([一二三四五六日天])/g, ' ')
       .replace(/[（(][^）)]{0,20}(周|星期|月|日|点|[:：])[^）)]{0,20}[)）]/g, ' ')
@@ -403,6 +415,10 @@
       .replace(/[，,。；;：:\-—•·|]/g, ' ')
       .replace(/\s{2,}/g, ' ')
       .trim();
+    // 课程前缀剥离：只剥非序数前缀，且名词后必须还有内容（「第一次作业」「第三章习题」不能被剥没）
+    const nounSuffix = '(?:期中|期末|考试|测验|作业|实验|报告|论文|习题|练习|项目|展示)';
+    const pm = s.match(new RegExp('^([\\u4e00-\\u9fa5]{2,10}[A-Za-z]?\\d{0,2})(' + nounSuffix + ')(.+)$'));
+    if (pm && !/第|[次章讲]$|单元/.test(pm[1]) && pm[3].trim().length >= 2) s = pm[2] + pm[3];
     return s.replace(/^[\s、到在于]+|[\s、到在于和及]+$/g, '').replace(/\s{2,}/g, ' ').slice(0, 28);
   }
 
@@ -451,15 +467,24 @@
   function extractTasks(text, now, ctx) {
     ctx = ctx || {};
     const clauses = splitTaskItems(text).split(/[。；;\n！!？?，,]/).map(x => x.trim()).filter(x => x.length >= 2);
+    const dls = clauses.map(function (c) { return parseDeadline(c, now); });
+    // 「纯截止子句」：去掉时间和截止字样后没有可当任务名的内容
+    const bareDl = clauses.map(function (c, i) {
+      if (!dls[i]) return false;
+      const rest = cleanTaskName(c.replace(dls[i].text, ' ').replace(/(截止(时间|日期)?|deadline)\s*[:：]?/ig, ' '), ctx);
+      return !rest || rest.length < 2 || /^(截止|deadline|前|提交|完成)$/i.test(rest);
+    });
     const tasks = [];
+    const emitted = clauses.map(function () { return false; });
     let prevDl = null;
-    for (const c of clauses) {
-      const dl = parseDeadline(c, now);
+    for (let i = 0; i < clauses.length; i++) {
+      const c = clauses[i];
+      const dl = dls[i];
       if (!dl && /考试内容|考试范围|复习范围|题型|分值|还是以|以.{0,20}为主/.test(c)) { prevDl = null; continue; }
       const noun = c.match(TASK_NOUN);
       const hasVerb = TASK_WORDS.test(c);
-      const prevHadDeadlineOnly = prevDl && /截止|deadline|前完成|前提交/i.test(c === clauses[0] ? '' : '');
-      if (!dl && !noun) { prevDl = null; continue; }
+      // 有动词的子句即使没有「作业/报告」类名词也可能是任务（如「提交材料」）
+      if (!dl && !noun && !hasVerb) { prevDl = null; continue; }
       if (!hasVerb && !/截止|deadline/i.test(c)) { prevDl = dl || prevDl; continue; }
       const localDl = dl || (prevDl && /^\s*(截止|deadline)/i.test(prevLineText(clauses, c)) ? prevDl : null);
       let nameRaw = c.split(/特别是|尤其是|比如|例如/)[0];
@@ -478,6 +503,7 @@
       tasks.push({
         id: uid('tk'),
         name: name.slice(0, 28),
+        clauseIdx: i,
         deadline: localDl ? iso(localDl.date) : '',
         platform: platformForClause(c),
         type,
@@ -485,8 +511,25 @@
         confidence: clamp01(conf),
         deadlineConfidence: localDl ? localDl.confidence : 0.3
       });
+      emitted[i] = true;
       prevDl = dl || prevDl;
     }
+    // 向前吸收：任务子句没时间、紧随其后是「纯截止子句」时，把时间接上（「完成报告，周五18:00前提交」）
+    tasks.forEach(function (t) {
+      if (t.deadline) { delete t.clauseIdx; return; }
+      for (let j = t.clauseIdx + 1; j < clauses.length; j++) {
+        if (emitted[j]) break;
+        if (bareDl[j]) {
+          t.deadline = iso(dls[j].date);
+          t.deadlineConfidence = dls[j].confidence;
+          t.confidence = clamp01(Math.max(t.confidence, dls[j].confidence));
+          emitted[j] = true;
+          break;
+        }
+        if (dls[j] || TASK_NOUN.test(clauses[j]) || TASK_WORDS.test(clauses[j])) break;
+      }
+      delete t.clauseIdx;
+    });
     // 去重
     const seen = new Set();
     return tasks.filter(t => {
@@ -596,7 +639,7 @@
         if (/^(第)?\d{1,2}([-~—至、,，]\d{1,2})?节$/.test(t)) return false;
         if (/^\d{1,2}[:：]\d{2}([-~—至]\d{1,2}[:：]\d{2})?$/.test(t)) return false;
         if (/^(上午|下午|晚上|早上)$/.test(t)) return false;
-        if (/^(第)?\d{1,2}([-~—]\d{1,2})?周$/.test(t) || /^(单|双)周$/.test(t)) return false;
+        if (/^(第)?\d{1,2}([-~—]\d{1,2})?周(\s*[（(]\s*[单双]\s*[）)]?)?$/.test(t) || /^(单|双)周$/.test(t)) return false;
         if (!location && isLocationToken(t)) { location = t; return false; }
         return true;
       });
@@ -606,7 +649,8 @@
       if (ti >= 0) {
         teacher = tokens[ti];
         tokens.splice(ti, 1);
-      } else if (tokens.length >= 2 && /^[\u4e00-\u9fa5]{2,3}$/.test(tokens[tokens.length - 1])) {
+      } else if (tokens.length >= 2 && /^[\u4e00-\u9fa5]{2,3}$/.test(tokens[tokens.length - 1])
+        && !/(概论|导论|原理|实践|实训|视听说|精读|泛读|口语|听力|写作|设计与?|分析|基础|应用|技术|实验|训练|史|论|学)$/.test(tokens[tokens.length - 1])) {
         teacher = tokens.pop();
       }
       const name = tokens.join(' ').replace(/^[·\-—\s]+|[·\-—\s]+$/g, '').trim();
@@ -671,7 +715,7 @@
         img.onload = function () {
           try {
             var list = gridFromImage(img, overlay.lines, text, source, now);
-            if ((!list || !list.length) && /\(\s*\d{1,2}\s*[-~—至]\s*\d{1,2}\s*节\s*\)/.test(String(text || ''))) {
+            if ((!list || !list.length) && /[（(]\s*\d{1,2}\s*[-~—至]\s*\d{1,2}\s*节\s*[)）]/.test(String(text || ''))) {
               var items = overlay.lines.map(function (l) {
                 return { text: String(l.text || '').trim(), x: +l.left, y: +l.top, w: +l.width, h: +l.height };
               });
@@ -707,7 +751,7 @@
         l.cy > H * 0.03 && l.cy < H * 0.14 && l.cx > W * 0.10;
     }).sort(function (a, b) { return a.cx - b.cx; });
     var heads = lines.filter(function (l) {
-      var c = l.text.replace(/^周/, '');
+      var c = l.text.replace(/^(?:周|星期)/, '');
       return WD[c] && l.cy < H * 0.10;
     }).sort(function (a, b) { return a.cx - b.cx; });
     var cols = [];
@@ -718,7 +762,7 @@
       if (!(hStep > W * 0.05)) return null;
       var base = heads[0];
       for (var wd = 1; wd <= 7; wd++) {
-        var x = base.cx + (wd - WD[base.text.replace(/^周/, '')]) * hStep;
+        var x = base.cx + (wd - WD[base.text.replace(/^(?:周|星期)/, '')]) * hStep;
         if (x > W * 0.10 && x < W * 0.97) cols.push(x);
       }
     } else {
@@ -874,7 +918,8 @@
     var teacher = '';
     if (tx.length >= 2) {
       var cand = tx[tx.length - 1];
-      if (/^[\u4e00-\u9fa5]{2,4}(老师|教授)?$/.test(cand)) { teacher = cand; tx.pop(); }
+      if (/^[\u4e00-\u9fa5]{2,4}(老师|教授)?$/.test(cand)
+        && !/(概论|导论|原理|实践|实训|视听说|精读|泛读|口语|听力|写作|设计与?|分析|基础|应用|技术|实验|训练|史|论|学)$/.test(cand)) { teacher = cand; tx.pop(); }
     }
     var course = tx.join('').replace(/\s+/g, '').replace(/^[·\-—\s]+|[·\-—\s]+$/g, '').replace(/[，,。;；]$/, '').trim();
     if (!course || course.length > 24) course = (raw[0] || '').slice(0, 24);

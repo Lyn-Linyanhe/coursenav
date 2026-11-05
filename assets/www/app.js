@@ -93,18 +93,20 @@ let DB = loadDB();
 function loadDB() {
   try {
     const raw = localStorage.getItem(KEY);
-    if (!raw) return { v: 1, courses: [], pending: [], ledger: [], imports: [], classAlarmIds: [], settings: Object.assign({}, DEFAULT_SETTINGS) };
+    if (!raw) return { v: 1, courses: [], pending: [], ledger: [], imports: [], classAlarmIds: [], taskAlarmIds: [], settings: Object.assign({}, DEFAULT_SETTINGS) };
     const d = JSON.parse(raw);
-    d.courses = d.courses || []; d.pending = d.pending || []; d.ledger = d.ledger || []; d.imports = d.imports || [];
+    if (!Array.isArray(d.courses)) d.courses = []; if (!Array.isArray(d.pending)) d.pending = [];
+    if (!Array.isArray(d.ledger)) d.ledger = []; if (!Array.isArray(d.imports)) d.imports = [];
     d.settings = Object.assign({}, DEFAULT_SETTINGS, d.settings || {});
     // 没有自定义 Key 的用户回落到 helloworld（公共演示 Key，易限流），保留自定义 Key。
     d.settings.ocrKey = String(d.settings.ocrKey || '').trim();
     if (!d.settings.ocrKey || d.settings.ocrKey === 'helloworld') d.settings.ocrKey = SHARED_OCR_KEY;
     d.settings.sourceMemory = d.settings.sourceMemory || {};
-    d.classAlarmIds = d.classAlarmIds || [];
+    if (!Array.isArray(d.classAlarmIds)) d.classAlarmIds = [];
+    if (!Array.isArray(d.taskAlarmIds)) d.taskAlarmIds = [];
     return d;
   } catch (e) {
-    return { v: 1, courses: [], pending: [], ledger: [], imports: [], classAlarmIds: [], settings: Object.assign({}, DEFAULT_SETTINGS) };
+    return { v: 1, courses: [], pending: [], ledger: [], imports: [], classAlarmIds: [], taskAlarmIds: [], settings: Object.assign({}, DEFAULT_SETTINGS) };
   }
 }
 function saveDB() { try { localStorage.setItem(KEY, JSON.stringify(DB)); } catch (e) { diagLog('error', '本地存储写入失败', { message: e.message }); toast('本地存储空间不足'); } }
@@ -219,7 +221,9 @@ window.NativeCB = {
     let p; try { p = JSON.parse(payload); } catch (e) { return; }
     if (p.error || !p.dataUrl) { toast('读取图片失败'); return; }
     const target = UI.ocr && UI.ocr.target === 'timetable' ? 'timetable' : (UI.ocr && UI.ocr.target === 'task' ? 'task' : 'notice');
-    UI.ocr = { dataUrl: p.dataUrl, name: p.name || '截图', path: p.path || '', text: '', raw: '', overlay: null, busy: false, target: target, source_app: null };
+    // 换图时保留用户已输入/已识别的文字，避免手输内容被清空
+    const draft = UI.ocr && UI.ocr.dataUrl ? (UI.ocr.text || '') : (($('#pasteText') || {}).value || '');
+    UI.ocr = { dataUrl: p.dataUrl, name: p.name || '截图', path: p.path || '', text: draft, raw: '', overlay: null, busy: false, target: target, source_app: null };
     if (target === 'task') {
       if (DB.settings.ocr) {
         toast('截图已选，开始识别…');
@@ -240,7 +244,7 @@ window.NativeCB = {
   },
   onOcrResult(payload) {
     let p; try { p = JSON.parse(payload); } catch (e) { toast('OCR 返回解析失败'); return; }
-    UI.ocr.busy = false;
+    UI.ocr.busy = false; UI.ocr.tempSharedKey = false;
     if (UI.ocr.target === 'task') {
       if (!p.ok) {
         if (retryWithSharedKey(p.error)) return;
@@ -595,7 +599,7 @@ function renderImport() {
       '<div class="card import-card"><h3>导入通知</h3><p>粘贴群里的通知，或选一张截图自动识别；两种方式共用下面的文字框。</p>' +
       '<div class="form-row mt12"><button class="btn soft" style="flex:1" data-act="pick-ocr-image"><svg><use href="#i-doc"/></svg>' + (UI.ocr.dataUrl ? '更换截图' : '选择截图') + '</button>' +
       '<button class="btn ghost" style="flex:1" data-act="sample">填入示例</button></div>' +
-      (UI.ocr.dataUrl ? '<div class="ocr-mini"><img src="' + UI.ocr.dataUrl + '" alt="截图"><div><b>' + ESC(UI.ocr.name || '截图') + '</b><span>' + (UI.ocr.busy ? '识别中…' : (UI.ocr.text ? '已识别，可直接改文字' : '等待识别')) + '</span></div><button class="linkbtn" data-act="clear-ocr">移除</button></div>' : '') +
+      (UI.ocr.dataUrl ? '<div class="ocr-mini"><img src="' + ESC(UI.ocr.dataUrl) + '" alt="截图"><div><b>' + ESC(UI.ocr.name || '截图') + '</b><span>' + (UI.ocr.busy ? '识别中…' : (UI.ocr.text ? '已识别，可直接改文字' : '等待识别')) + '</span></div><button class="linkbtn" data-act="clear-ocr">移除</button></div>' : '') +
       '<textarea class="textarea mt12" id="pasteText" style="min-height:' + (UI.ocr.dataUrl ? '135' : '150') + 'px" placeholder="例如：\n【课程通知】《大学英语》王老师：请于11月20日23:59前在学习通提交Unit5读书报告，逾期不候。">' + ESC(UI.ocr.dataUrl ? (UI.ocr.text || '') : '') + '</textarea>' +
       '<div class="form-row mt12"><button class="btn primary" style="flex:2" data-act="parse-paste">识别并直接保存</button>' +
       (UI.ocr.dataUrl ? '<button class="btn ghost" style="flex:1" data-act="ocr-run">重新识别</button>' : '') + '</div>' +
@@ -637,9 +641,12 @@ function ocrFailSheet(err, target) {
   const raw = String(err || '');
   let title = '识别失败', msg = '没有拿到识别结果。可以换一张更清晰的截图，或直接粘贴文字。', hint = '';
   if (/429|rate limit|E584/i.test(raw)) {
+    const pub = String((DB.settings && DB.settings.ocrKey) || '').trim() === SHARED_OCR_KEY;
     title = 'OCR 免费额度用完了';
-    msg = '<b>不是截图或识别规则的问题。</b>当前用的是 OCR.space 的公共测试 Key <b>helloworld</b>，所有用户共用，今天被限流了（HTTP 429）。';
-    hint = '内测请换成自己的免费 Key；填一次后只保存在本机。';
+    msg = pub
+      ? '<b>不是截图或识别规则的问题。</b>当前用的是 OCR.space 的公共演示 Key <b>helloworld</b>，所有用户共用，今天被限流了（HTTP 429）。'
+      : '你的 OCR Key 今日额度用完了（HTTP 429），等额度恢复或换一个 Key。';
+    hint = pub ? '换成自己的免费 Key；填一次后只保存在本机。' : '在“我的 → 截图文字识别”里换 Key 或明天再试。';
   } else if (/401|403|apikey|api key|unauthorized/i.test(raw)) {
     title = 'OCR Key 无效';
     msg = 'OCR 服务拒绝了当前 Key，可能是 Key 写错、过期，或该接口不支持这个 Key。';
@@ -664,10 +671,10 @@ function retryWithSharedKey(err) {
   if (!invalid) return false;
   const cur = String((DB.settings && DB.settings.ocrKey) || '').trim();
   if (cur === SHARED_OCR_KEY) return false;
-  DB.settings.ocrKey = SHARED_OCR_KEY;
-  saveDB();
-  diagLog('ocr', '当前 Key 被拒，切换默认 Key 重试', { error: msg.slice(0, 200), keyLen: cur.length });
-    toast('当前 OCR Key 无效，已切换默认 Key 重试');
+  if (UI.ocr.tempSharedKey) return false; // 默认 Key 也被拒，不再重试
+  UI.ocr.tempSharedKey = true; // 只对本次请求改用默认 Key，不覆盖用户设置
+  diagLog('ocr', '当前 Key 被拒，本次用默认 Key 重试', { error: msg.slice(0, 200), keyLen: cur.length });
+    toast('当前 OCR Key 被拒，本次改用默认 Key 重试');
   UI.ocr.busy = false;
   setTimeout(() => doOcr(), 180);
   return true;
@@ -687,12 +694,14 @@ function startOcr() {
   doOcr();
 }
 function doOcr() {
+  if (UI.ocr.busy) { toast('正在识别中，请稍等'); return; }
   UI.ocr.busy = true;
   const btn = $('#ocrRun');
   if (btn) { btn.disabled = true; btn.textContent = '识别中…'; }
   const comma = UI.ocr.dataUrl.indexOf(',');
   const b64 = comma >= 0 ? UI.ocr.dataUrl.slice(comma + 1) : UI.ocr.dataUrl;
-  try { Bridge.ocr(b64, 'image/jpeg', DB.settings.ocrEndpoint, String(DB.settings.ocrKey || '').trim(), DB.settings.ocrLang); }
+  const key = UI.ocr.tempSharedKey ? SHARED_OCR_KEY : String(DB.settings.ocrKey || '').trim();
+  try { Bridge.ocr(b64, 'image/jpeg', DB.settings.ocrEndpoint, key, DB.settings.ocrLang); }
   catch (e) { UI.ocr.busy = false; toast('无法调用 OCR：' + e.message); if (UI.ocr.target !== 'task') renderImport(); }
 }
 
@@ -830,8 +839,8 @@ function autoSaveBatch(list, source, sourceApp) {
   go('#/home');
 }
 
-function startBatch(list, source) {
-  autoSaveBatch(list, source);
+function startBatch(list, source, sourceApp) {
+  autoSaveBatch(list, source, sourceApp);
 }
 
 function timetableFallback(text) {
@@ -1673,7 +1682,7 @@ function redact(s) {
   let out = String(s)
     .replace(/1[3-9]\d{9}/g, m => { count++; return m.slice(0, 3) + '****' + m.slice(7); })
     .replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, m => { count++; return '[邮箱]'; })
-    .replace(/(?<!\d)\d{12,}(?!\d)/g, m => { count++; return '[数字]'; })
+    .replace(/(^|[^\d])(\d{12,})(?!\d)/g, (m, pre) => { count++; return pre + '[数字]'; })
     .replace(/[（(]\s*(学号|工号)\s*[:：]?\s*\d+\s*[)）]/g, m => { count++; return '[学号已隐藏]'; });
   return { text: out, count };
 }
@@ -2229,12 +2238,17 @@ function scheduleTask(c, t) {
   const at = t.remindAt ? new Date(t.remindAt).getTime() : new Date(t.deadline).getTime() - (+DB.settings.lead || 0) * 60000;
   if (isNaN(at) || at < Date.now() + 5000) return;
   Bridge.notifyAt('task_' + t.id, c.course + ' · ' + t.name, (t.deadline_default ? '默认提醒：' : '截止 ') + fmtDT(t.deadline) + '，点开查看提交入口', at);
+  if ((DB.taskAlarmIds || []).indexOf('task_' + t.id) < 0) DB.taskAlarmIds.push('task_' + t.id);
 }
 function syncReminders() {
+  const live = {};
   allTasks().forEach(({ c, t }) => {
     if (t.status === '已完成' || t.remind === false) Bridge.cancel('task_' + t.id);
-    else scheduleTask(c, t);
+    else { scheduleTask(c, t); live['task_' + t.id] = true; }
   });
+  // 差集取消：已删除任务（撤销导入、编辑删除）残留的闹钟也要清掉
+  (DB.taskAlarmIds || []).forEach(id => { if (!live[id]) Bridge.cancel(id); });
+  DB.taskAlarmIds = Object.keys(live);
   syncClassReminders();
 }
 
